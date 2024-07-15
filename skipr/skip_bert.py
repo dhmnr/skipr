@@ -905,11 +905,16 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        
+        if self.config.is_decoder:
+            use_cache = use_cache if use_cache is not None else self.config.use_cache
+        else:
+            use_cache = False
 
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
+            self.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
@@ -919,6 +924,34 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         batch_size, seq_length = input_shape
         device = input_ids.device if input_ids is not None else inputs_embeds.device
 
+        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+
+        if attention_mask is None:
+            attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
+
+        if token_type_ids is None:
+            if hasattr(self.embeddings, "token_type_ids"):
+                buffered_token_type_ids = self.embeddings.token_type_ids[:, :seq_length]
+                buffered_token_type_ids_expanded = buffered_token_type_ids.expand(batch_size, seq_length)
+                token_type_ids = buffered_token_type_ids_expanded
+            else:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape)
+
+        # If a 2D or 3D attention mask is provided for the cross-attention
+        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        if self.config.is_decoder and encoder_hidden_states is not None:
+            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
+            if encoder_attention_mask is None:
+                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+            encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+        else:
+            encoder_extended_attention_mask = None
+
         # Prepare head mask if needed
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
@@ -927,19 +960,20 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             position_ids=position_ids,
             token_type_ids=token_type_ids,
             inputs_embeds=inputs_embeds,
+            past_key_values_length=past_key_values_length,
         )
 
         if skip_decoding:
             return self._forward_with_skip_decoding(
-                embedding_output, attention_mask, head_mask, output_attentions, output_hidden_states, return_dict
+                embedding_output, extended_attention_mask, head_mask, output_attentions, output_hidden_states, return_dict
             )
         else:
             encoder_outputs = self.encoder(
                 embedding_output,
-                attention_mask=attention_mask,
+                attention_mask=extended_attention_mask,
                 head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
+                encoder_attention_mask=encoder_extended_attention_mask,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -981,9 +1015,6 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
 
         active_samples = torch.ones(batch_size, dtype=torch.bool, device=device)
 
-        # Extend attention_mask for skip decoding
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, (batch_size, seq_length), device)
-
         for i, layer_module in enumerate(self.encoder.layer):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
@@ -1011,14 +1042,14 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             if active_samples.sum() == batch_size:
                 layer_outputs = layer_module(
                     hidden_states,
-                    attention_mask=extended_attention_mask,
+                    attention_mask=attention_mask,
                     head_mask=layer_head_mask,
                     output_attentions=output_attentions,
                 )
             else:
                 # Process only active samples
                 active_hidden_states = hidden_states[active_samples]
-                active_attention_mask = extended_attention_mask[active_samples]
+                active_attention_mask = attention_mask[active_samples]
                 
                 layer_outputs = layer_module(
                     active_hidden_states,
@@ -1722,6 +1753,102 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.num_labels = config.num_labels
         self.config = config
 
+        self.bert = BertModel(config)
+        classifier_dropout = (
+            config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
+        )
+        self.dropout = nn.Dropout(classifier_dropout)
+        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_SEQUENCE_CLASSIFICATION,
+        output_type=SequenceClassifierOutput,
+        config_class=_CONFIG_FOR_DOC,
+        expected_output=_SEQ_CLASS_EXPECTED_OUTPUT,
+        expected_loss=_SEQ_CLASS_EXPECTED_LOSS,
+    )
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple[torch.Tensor], SequenceClassifierOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.bert(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooled_output = outputs[1]
+
+        pooled_output = self.dropout(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class BertForSequenceClassificationWithSkipDecoding(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.config = config
+
         self.bert = BertModelWithSkipDecoding(config)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
@@ -1811,7 +1938,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            skip_decisions=outputs.skip_decisions,
+            skip_decisions=outputs.skip_decisions if hasattr(outputs, "skip_decisions" ) else None,
         )
 
 

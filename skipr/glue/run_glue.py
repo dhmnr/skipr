@@ -46,7 +46,7 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
-from ..skip_bert import BertForSequenceClassification
+from ..skip_bert import BertForSequenceClassification, BertForSequenceClassificationWithSkipDecoding
 from ..skip_trainer import SkipDecodingTrainer
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -218,6 +218,15 @@ class ModelArguments:
     ignore_mismatched_sizes: bool = field(
         default=False,
         metadata={"help": "Will enable to load a pretrained model whose head dimensions are different."},
+    )
+
+    mode: str = field(
+        default=None,
+        metadata={
+            "help": (
+                "Mode in which the script runs 'classfier' or 'policy'"
+            )
+        },
     )
 
 
@@ -399,7 +408,7 @@ def main():
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
     )
-    model = BertForSequenceClassification.from_pretrained(
+    model = BertForSequenceClassificationWithSkipDecoding.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
@@ -409,6 +418,8 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
         ignore_mismatched_sizes=model_args.ignore_mismatched_sizes,
     )
+
+
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -541,15 +552,28 @@ def main():
         data_collator = None
 
     # Initialize our Trainer
-    trainer = SkipDecodingTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        compute_metrics=compute_metrics,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-    )
+    if model_args.mode == 'classifier':
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset if training_args.do_train else None,
+            eval_dataset=eval_dataset if training_args.do_eval else None,
+            compute_metrics=compute_metrics,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+        )
+    elif model_args.mode == 'policy':
+        trainer = SkipDecodingTrainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_dataset if training_args.do_train else None,
+            eval_dataset=eval_dataset if training_args.do_eval else None,
+            compute_metrics=compute_metrics,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+        )
+    else:
+        raise Exception("Invalid Argument {mode}")
 
     # Training
     if training_args.do_train:
