@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "skipr"
+version = "0.1.0"
+description = ""
+authors = ["Dheemanth Manur <dmanu006@ucr.edu>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+transformers = "4.40.2"
+numpy = "1.26.4"
+datasets = "^2.20.0"
+evaluate = "^0.4.2"
+torch = "^2.3.1"
+accelerate = "^0.31.0"
+scipy = "^1.14.0"
+scikit-learn = "^1.5.0"
+
+[tool.poetry.scripts]
+glue = "skipr.glue.run_glue:main"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
