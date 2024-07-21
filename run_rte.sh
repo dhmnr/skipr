@@ -1,6 +1,6 @@
 #!/bin/bash
 export TASK_NAME=rte
-export EPOCHS=2
+export EPOCHS=100
 
 # poetry run glue \
 #   --model_name_or_path google-bert/bert-base-cased \

@@ -10,14 +10,16 @@ RTE
   eval_samples_per_second =    439.076
   eval_steps_per_second   =     14.266
 ------------------------------------------------------------------------------------------
-***** eval metrics (skip) *****
-  epoch                   =       30.0
-  eval_accuracy           =     0.4729
-  eval_loss               =        nan
-  eval_runtime            = 0:00:00.94
+***** eval metrics (skip) ***** alpha = 0.0030
+  epoch                   =      100.0
+  eval_accuracy           =     0.6318
+  eval_avg_layers         =     2.2347
+  eval_combined_score     =     1.4332
+  eval_loss               =    -0.0561
+  eval_runtime            = 0:00:00.58
   eval_samples            =        277
-  eval_samples_per_second =    292.624
-  eval_steps_per_second   =      9.508
+  eval_samples_per_second =    476.753
+  eval_steps_per_second   =      15.49
 =========================================================================================
 MNLI
 =========================================================================================

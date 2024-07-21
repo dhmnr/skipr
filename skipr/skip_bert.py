@@ -856,7 +856,7 @@ class SkipBertOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
-    exit_layers: Optional[torch.FloatTensor] = None
+    skip_layers: Optional[torch.FloatTensor] = None
     skip_probs: Optional[torch.FloatTensor] = None
 
 
@@ -873,7 +873,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         self.skip_policy = nn.ModuleList([PolicyNetwork(config.hidden_size, 1) for _ in range(config.num_hidden_layers - 1 )])
         self.eps_start = 0.9
         self.eps_end = 0.05
-        self.eps_decay = 10000
+        self.eps_decay = 1000
         self.steps_done = 0
 
         self.post_init()
@@ -1018,7 +1018,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         
         exit_layers = torch.full((batch_size,), self.config.num_hidden_layers, device=device)
         all_skip_probs = torch.zeros(batch_size, device=device)
-        skip_count = torch.zeros(batch_size, device=device)
+        skip_layers = torch.zeros(batch_size, device=device)
         active_samples = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         for i, layer_module in enumerate(self.encoder.layer):
@@ -1040,7 +1040,8 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                     # skip_decision = torch.logical_or(skip_decision, eps_exploration).float()
                 else:
                     skip_decision = (skip_probs > 0.5).float()
-                skip_count +=  skip_decision
+                # print(f"layer {i} : {skip_decision}")
+                skip_layers +=  skip_decision
                 temp_probs = torch.where(
                     (skip_decision == 1) ,
                     skip_probs,
@@ -1057,8 +1058,6 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                 # )
                 active_samples = active_samples & (skip_decision == 0)
 
-            if active_samples.sum() == 0:
-                break
 
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
@@ -1093,12 +1092,12 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
-        print(skip_count)
+        # print(f"total : {skip_layers}")
         sequence_output = hidden_states
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output, all_hidden_states, all_attentions, exit_layers, all_skip_probs)
+            return (sequence_output, pooled_output, all_hidden_states, all_attentions, skip_layers, all_skip_probs)
         
         return SkipBertOutput(
             last_hidden_state=sequence_output,
@@ -1106,7 +1105,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_attentions,
             cross_attentions=None,
-            exit_layers=exit_layers,
+            skip_layers=skip_layers,
             skip_probs=all_skip_probs,
         )
 
@@ -1763,7 +1762,7 @@ class BertForNextSentencePrediction(BertPreTrainedModel):
 @dataclass
 class SkipBertSequenceClassifierOutput(SequenceClassifierOutput):
     skip_probs: Optional[torch.FloatTensor] = None
-    exit_layers: Optional[torch.FloatTensor] = None
+    skip_layers: Optional[torch.FloatTensor] = None
 
 @add_start_docstrings(
     """
@@ -1964,7 +1963,7 @@ class BertForSequenceClassificationWithSkipDecoding(BertPreTrainedModel):
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            exit_layers=outputs.exit_layers if hasattr(outputs, "exit_layers" ) else None,
+            skip_layers=outputs.skip_layers if hasattr(outputs, "skip_layers" ) else None,
             skip_probs=outputs.skip_probs if hasattr(outputs, "skip_probs" ) else None,
         )
 

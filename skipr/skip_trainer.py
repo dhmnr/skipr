@@ -1,13 +1,32 @@
-from typing import Dict
+from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
+from torch import nn
 from torch.nn import functional as F
 
 from transformers import Trainer
+from transformers.trainer_pt_utils import (
+   
+    nested_detach,
+
+)
+from transformers.utils import (
+   
+    is_sagemaker_mp_enabled,
+    is_torch_compile_available,
+    is_torch_mlu_available,
+    is_torch_neuroncore_available,
+    is_torch_npu_available,
+    is_torch_xla_available,
+    logging,
+    strtobool,
+)
+
 import math
 
 
+
 class SkipDecodingTrainer(Trainer):
-    def __init__(self, *args, skip_weight=0.1, sample_K=8, **kwargs):
+    def __init__(self, *args, skip_weight=0.0031, sample_K=8, **kwargs):
         super().__init__(*args, **kwargs)
         self.skip_weight = skip_weight
         self.sample_K = sample_K
@@ -65,26 +84,22 @@ class SkipDecodingTrainer(Trainer):
         # raise
         # Unpack outputs
         if isinstance(outputs, tuple):
-            classification_loss, logits, exit_layers, skip_probs = outputs[:4]
+            classification_loss, logits, skip_layers, skip_probs = outputs[:4]
         elif isinstance(outputs, dict):
             classification_loss = outputs['loss']
             logits = outputs['logits']
-            exit_layers = outputs['exit_layers']
+            skip_layers = outputs['skip_layers']
             skip_probs = outputs['skip_probs']
             # print(f"loss shape {classification_loss.shape}")
             # print(f"logits shape {logits.shape}")
-            # print(f"exit_layers shape {exit_layers.shape}")
+            # print(f"skip_layers shape {skip_layers.shape}")
             # print(f"skip_probs shape {skip_probs.shape}")
         
         else:
             raise ValueError("Unexpected output format from model")
-
-        batch_size = math.ceil(logits.size(0) / self.args.n_gpu)
-        # Calculate rewards (negative loss)
         
-        rewards = -classification_loss
+        rewards = -classification_loss + self.skip_weight * skip_layers
 
-        # Compute advantage (reward - baseline)
         baseline = rewards.mean()
         advantage = rewards - baseline
         # advantage = advantage[:logits.size(0)]
@@ -100,7 +115,7 @@ class SkipDecodingTrainer(Trainer):
         # log_probs = log_probs.sum(dim=1)  # Sum log probs across layers
         # print("log_probs shape", log_probs.shape)
         log_probs = skip_probs
-        # Compute policy loss
+
         policy_loss = -(advantage * log_probs).mean()
         
         # Total loss (you can adjust the entropy coefficient)
@@ -108,9 +123,8 @@ class SkipDecodingTrainer(Trainer):
 
         if return_outputs:
             return total_loss, outputs
-        print(f'Loss: {total_loss}')
+        # print(f'Loss: {total_loss}')
         return total_loss
-
 
     def training_step(self, model, inputs):
         model.train()
@@ -150,5 +164,108 @@ class SkipDecodingTrainer(Trainer):
 
         super().log(logs)
 
+    def prediction_step(
+        self,
+        model: nn.Module,
+        inputs: Dict[str, Union[torch.Tensor, Any]],
+        prediction_loss_only: bool,
+        ignore_keys: Optional[List[str]] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Perform an evaluation step on `model` using `inputs`.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to evaluate.
+            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+            prediction_loss_only (`bool`):
+                Whether or not to return the loss only.
+            ignore_keys (`List[str]`, *optional*):
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions.
+
+        Return:
+            Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss,
+            logits and labels (each being optional).
+        """
+        has_labels = False if len(self.label_names) == 0 else all(inputs.get(k) is not None for k in self.label_names)
+        # For CLIP-like models capable of returning loss values.
+        # If `return_loss` is not specified or being `None` in `inputs`, we check if the default value of `return_loss`
+        # is `True` in `model.forward`.
+        return_loss = inputs.get("return_loss", None)
+        if return_loss is None:
+            return_loss = self.can_return_loss
+        loss_without_labels = True if len(self.label_names) == 0 and return_loss else False
+
+        inputs = self._prepare_inputs(inputs)
+        if ignore_keys is None:
+            if hasattr(self.model, "config"):
+                ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
+            else:
+                ignore_keys = []
+
+        # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
+        if has_labels or loss_without_labels:
+            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
+            if len(labels) == 1:
+                labels = labels[0]
+        else:
+            labels = None
+
+        with torch.no_grad():
+            if is_sagemaker_mp_enabled():
+                raw_outputs = smp_forward_only(model, inputs)
+                if has_labels or loss_without_labels:
+                    if isinstance(raw_outputs, dict):
+                        loss_mb = raw_outputs["loss"]
+                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys + ["loss"])
+                    else:
+                        loss_mb = raw_outputs[0]
+                        logits_mb = raw_outputs[1:]
+
+                    loss = loss_mb.reduce_mean().detach().cpu()
+                    logits = smp_nested_concat(logits_mb)
+                else:
+                    loss = None
+                    if isinstance(raw_outputs, dict):
+                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys)
+                    else:
+                        logits_mb = raw_outputs
+                    logits = smp_nested_concat(logits_mb)
+            else:
+                if has_labels or loss_without_labels:
+                    with self.compute_loss_context_manager():
+                        loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                    loss = loss.mean().detach()
+
+                    if isinstance(outputs, dict):
+                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
+                    else:
+                        logits = outputs[1:]
+                else:
+                    loss = None
+                    with self.compute_loss_context_manager():
+                        outputs = model(**inputs)
+                    if isinstance(outputs, dict):
+                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
+                    else:
+                        logits = outputs
+                    # TODO: this needs to be fixed and made cleaner later.
+                    if self.args.past_index >= 0:
+                        self._past = outputs[self.args.past_index - 1]
+
+        if prediction_loss_only:
+            return (loss, None, None)
+
+        logits = nested_detach(logits)
+        if len(logits) == 1:
+            logits = logits[0]
+        return (loss, logits, labels)
 
 # TODO : Sample_K, loss computation 
