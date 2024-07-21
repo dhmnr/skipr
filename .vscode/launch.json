@@ -1,0 +1,26 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Module",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "skipr.glue.run_glue",
+            "args": [
+                        "--model_name_or_path", "./models/rte/classifier",
+                        "--task_name", "rte",
+                        "--do_eval", "yes",
+                        "--max_seq_length", "128",
+                        "--per_device_train_batch_size", "1",
+                        "--learning_rate", "2e-4",
+                        "--num_train_epochs", "2",
+                        "--output_dir", "./models/rte/policy",
+                        "--overwrite_output_dir", "yes",
+                        "--mode", "policy",
+                    ]
+        }
+    ]
+}

@@ -1,10 +1,8 @@
-Implement policy training
- - Freeze all weights except policy
- - check inference and training
- - change bash scripts
+
 
 Check out Sample_K
 
 Implement timing measuring
 
 Write auto script that goes through all options
+

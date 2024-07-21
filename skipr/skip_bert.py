@@ -49,7 +49,7 @@ from transformers.utils import (
     replace_return_docstrings,
 )
 from transformers.models.bert.configuration_bert import BertConfig
-
+from .utils import fingerprint_tensor
 
 logger = logging.get_logger(__name__)
 
@@ -529,14 +529,16 @@ class BertLayer(nn.Module):
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, n_observations, n_actions, hidden_dim=32):
+    def __init__(self, n_observations, n_actions, hidden_dim=128):
         super().__init__()
         self.layer1 = nn.Linear(n_observations, hidden_dim)
         self.layer2 = nn.Linear(hidden_dim, n_actions)
+        # self.layer2 = nn.Linear(hidden_dim, n_actions)
+
 
     def forward(self, x):
         x = nn.functional.gelu(self.layer1(x))
-        x = torch.sigmoid(self.layer2(x))
+        x = self.layer2(x)
         return x
 
 
@@ -545,7 +547,7 @@ class BertEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
-        self.policy_networks = nn.ModuleList([PolicyNetwork(config.hidden_size, 1) for _ in range(config.num_hidden_layers)])
+        # self.policy_networks = nn.ModuleList([PolicyNetwork(config.hidden_size, 1) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -574,6 +576,8 @@ class BertEncoder(nn.Module):
 
         next_decoder_cache = () if use_cache else None
         for i, layer_module in enumerate(self.layer):
+            # print(f"FULL {i} {fingerprint_tensor(hidden_states)}")
+
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -852,7 +856,8 @@ class SkipBertOutput(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
-    skip_decisions: Optional[torch.FloatTensor] = None
+    exit_layers: Optional[torch.FloatTensor] = None
+    skip_probs: Optional[torch.FloatTensor] = None
 
 
 class BertModelWithSkipDecoding(BertPreTrainedModel):
@@ -865,10 +870,10 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
         # Skip decoding components
-        self.skip_policy = nn.ModuleList([nn.Linear(config.hidden_size, 1) for _ in range(config.num_hidden_layers - 1)])
+        self.skip_policy = nn.ModuleList([PolicyNetwork(config.hidden_size, 1) for _ in range(config.num_hidden_layers - 1 )])
         self.eps_start = 0.9
         self.eps_end = 0.05
-        self.eps_decay = 1000
+        self.eps_decay = 10000
         self.steps_done = 0
 
         self.post_init()
@@ -910,7 +915,6 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             use_cache = use_cache if use_cache is not None else self.config.use_cache
         else:
             use_cache = False
-
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
@@ -980,7 +984,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-
+        
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
@@ -1011,27 +1015,46 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
 
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
-        all_skip_decisions = torch.zeros(batch_size, self.config.num_hidden_layers - 1, device=device)
-
+        
+        exit_layers = torch.full((batch_size,), self.config.num_hidden_layers, device=device)
+        all_skip_probs = torch.zeros(batch_size, device=device)
+        skip_count = torch.zeros(batch_size, device=device)
         active_samples = torch.ones(batch_size, dtype=torch.bool, device=device)
 
         for i, layer_module in enumerate(self.encoder.layer):
+            # print(f"SKIP {i} {fingerprint_tensor(hidden_states)}")
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            if i < len(self.encoder.layer) - 1:
+            if (i > 0) and (i < len(self.encoder.layer) - 1):
                 skip_logits = self.skip_policy[i](hidden_states[:, 0])  # Use [CLS] token representation
                 skip_probs = torch.sigmoid(skip_logits).squeeze(-1)
+                # all_skip_probs[:, i] = skip_probs
 
                 if self.training:
                     eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * \
                         math.exp(-1. * self.steps_done / self.eps_decay)
                     self.steps_done += 1
-                    skip_decision = (torch.rand_like(skip_probs) < eps_threshold).float()
+                    eps_exploration = (torch.rand_like(skip_probs) < eps_threshold).float()
+                    skip_decision = (skip_probs > 0.5).float()
+                    # skip_decision = torch.logical_or(skip_decision, eps_exploration).float()
                 else:
                     skip_decision = (skip_probs > 0.5).float()
+                skip_count +=  skip_decision
+                temp_probs = torch.where(
+                    (skip_decision == 1) ,
+                    skip_probs,
+                    1 - skip_probs
+                )
 
-                all_skip_decisions[:, i] = skip_decision
+                all_skip_probs += torch.log(temp_probs)
+
+                # Update exit layers for samples that are skipping
+                # exit_layers = torch.where(
+                #     (skip_decision == 1) & (exit_layers == self.config.num_hidden_layers),
+                #     torch.tensor(i + 1, device=device),
+                #     exit_layers
+                # )
                 active_samples = active_samples & (skip_decision == 0)
 
             if active_samples.sum() == 0:
@@ -1049,7 +1072,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             else:
                 # Process only active samples
                 active_hidden_states = hidden_states[active_samples]
-                active_attention_mask = attention_mask[active_samples]
+                active_attention_mask = attention_mask[active_samples] if attention_mask is not None else None
                 
                 layer_outputs = layer_module(
                     active_hidden_states,
@@ -1059,9 +1082,9 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                 )
 
                 # Update hidden states for active samples
-                new_hidden_states = hidden_states.clone()
-                new_hidden_states[active_samples] = layer_outputs[0]
-                hidden_states = new_hidden_states
+            new_hidden_states = hidden_states.clone()
+            new_hidden_states[active_samples] = layer_outputs[0]
+            hidden_states = new_hidden_states
 
             if output_attentions:
                 attention = torch.zeros(batch_size, layer_outputs[1].shape[1], seq_length, seq_length, device=device)
@@ -1070,20 +1093,21 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
 
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
-
+        print(skip_count)
         sequence_output = hidden_states
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output, all_hidden_states, all_attentions, all_skip_decisions)
-
+            return (sequence_output, pooled_output, all_hidden_states, all_attentions, exit_layers, all_skip_probs)
+        
         return SkipBertOutput(
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             hidden_states=all_hidden_states,
             attentions=all_attentions,
             cross_attentions=None,
-            skip_decisions=all_skip_decisions,
+            exit_layers=exit_layers,
+            skip_probs=all_skip_probs,
         )
 
 @add_start_docstrings(
@@ -1738,7 +1762,8 @@ class BertForNextSentencePrediction(BertPreTrainedModel):
 
 @dataclass
 class SkipBertSequenceClassifierOutput(SequenceClassifierOutput):
-    skip_decisions: Optional[torch.FloatTensor] = None
+    skip_probs: Optional[torch.FloatTensor] = None
+    exit_layers: Optional[torch.FloatTensor] = None
 
 @add_start_docstrings(
     """
@@ -1848,6 +1873,7 @@ class BertForSequenceClassificationWithSkipDecoding(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
+        
 
         self.bert = BertModelWithSkipDecoding(config)
         classifier_dropout = (
@@ -1908,6 +1934,7 @@ class BertForSequenceClassificationWithSkipDecoding(BertPreTrainedModel):
         logits = self.classifier(pooled_output)
 
         loss = None
+
         if labels is not None:
             if self.config.problem_type is None:
                 if self.num_labels == 1:
@@ -1918,27 +1945,27 @@ class BertForSequenceClassificationWithSkipDecoding(BertPreTrainedModel):
                     self.config.problem_type = "multi_label_classification"
 
             if self.config.problem_type == "regression":
-                loss_fct = MSELoss()
+                loss_fct = MSELoss(reduction='none')
                 if self.num_labels == 1:
                     loss = loss_fct(logits.squeeze(), labels.squeeze())
                 else:
                     loss = loss_fct(logits, labels)
             elif self.config.problem_type == "single_label_classification":
-                loss_fct = CrossEntropyLoss()
+                loss_fct = CrossEntropyLoss(reduction='none')
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
             elif self.config.problem_type == "multi_label_classification":
-                loss_fct = BCEWithLogitsLoss()
+                loss_fct = BCEWithLogitsLoss(reduction='none')
                 loss = loss_fct(logits, labels)
         if not return_dict:
             output = (logits,) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
-
         return SkipBertSequenceClassifierOutput(
             loss=loss,
             logits=logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            skip_decisions=outputs.skip_decisions if hasattr(outputs, "skip_decisions" ) else None,
+            exit_layers=outputs.exit_layers if hasattr(outputs, "exit_layers" ) else None,
+            skip_probs=outputs.skip_probs if hasattr(outputs, "skip_probs" ) else None,
         )
 
 

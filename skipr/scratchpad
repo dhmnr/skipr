@@ -1,0 +1,24 @@
+loss = outputs[0]  # model outputs are always tuple in transformers (see doc)
+logits = outputs[1]
+layers = outputs[2]
+probs = outputs[3]
+
+L = len(loss)
+
+bsz = L // sample_K
+rewards = [[] for _ in range(bsz)]
+
+for i in range(L):
+    reward = -loss[i].item() 
+    rewards[i % bsz].append(reward) 
+
+
+policy_loss = 0
+for i in range(bsz):
+    rs = rewards[i]
+    baseline = sum(rs) / len(rs)
+    for j in range(sample_K):
+        reward = (rs[j] - baseline) 
+        policy_loss += reward * probs[j * bsz + i] * -1 
+policy_loss = policy_loss / L
+loss = policy_loss
