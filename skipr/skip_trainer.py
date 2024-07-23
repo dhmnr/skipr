@@ -26,7 +26,7 @@ import math
 
 
 class SkipDecodingTrainer(Trainer):
-    def __init__(self, *args, skip_weight=0.0031, sample_K=8, **kwargs):
+    def __init__(self, *args, skip_weight=0.003, sample_K=8, **kwargs):
         super().__init__(*args, **kwargs)
         self.skip_weight = skip_weight
         self.sample_K = sample_K

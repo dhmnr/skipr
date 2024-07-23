@@ -74,6 +74,7 @@ _QA_TARGET_END_INDEX = 15
 _CHECKPOINT_FOR_SEQUENCE_CLASSIFICATION = "textattack/bert-base-uncased-yelp-polarity"
 _SEQ_CLASS_EXPECTED_OUTPUT = "'LABEL_1'"
 _SEQ_CLASS_EXPECTED_LOSS = 0.01
+EPS_STEPS_COUNT = 0
 
 
 from transformers.models.deprecated._archive_maps import BERT_PRETRAINED_MODEL_ARCHIVE_LIST  # noqa: F401, E402
@@ -873,7 +874,7 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         self.skip_policy = nn.ModuleList([PolicyNetwork(config.hidden_size, 1) for _ in range(config.num_hidden_layers - 1 )])
         self.eps_start = 0.9
         self.eps_end = 0.05
-        self.eps_decay = 1000
+        self.eps_decay = 800
         self.steps_done = 0
 
         self.post_init()
@@ -1013,6 +1014,13 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
         batch_size, seq_length, _ = hidden_states.shape
         device = hidden_states.device
 
+        global EPS_STEPS_COUNT
+        
+        eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * \
+            math.exp(-1. * EPS_STEPS_COUNT / self.eps_decay)
+        EPS_STEPS_COUNT += 1
+        # print(eps_threshold)
+
         all_hidden_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
         
@@ -1032,9 +1040,6 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                 # all_skip_probs[:, i] = skip_probs
 
                 if self.training:
-                    eps_threshold = self.eps_end + (self.eps_start - self.eps_end) * \
-                        math.exp(-1. * self.steps_done / self.eps_decay)
-                    self.steps_done += 1
                     eps_exploration = (torch.rand_like(skip_probs) < eps_threshold).float()
                     skip_decision = (skip_probs > 0.5).float()
                     # skip_decision = torch.logical_or(skip_decision, eps_exploration).float()

@@ -23,6 +23,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional
+import json
 
 import datasets
 import evaluate
@@ -225,6 +226,15 @@ class ModelArguments:
         metadata={
             "help": (
                 "Mode in which the script runs 'classfier' or 'policy'"
+            )
+        },
+    )
+
+    alpha: float = field(
+        default=0.003,
+        metadata={
+            "help": (
+                "Adjust the balance between model loss and layer usage."
             )
         },
     )
@@ -540,9 +550,11 @@ def main():
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
         result = metric.compute(predictions=preds, references=p.label_ids)
         if len(p.predictions) == 3:
-            result['avg_layers'] = np.mean(p.predictions[-1])
+            result['avg_layers'] = np.mean(p.predictions[-1]).item()
         if len(result) > 1:
             result["combined_score"] = np.mean(list(result.values())).item()
+        with open(f"alpha-{model_args.alpha}", 'w') as f: 
+            json.dump(result, f)
         return result
 
     # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
@@ -566,6 +578,7 @@ def main():
             data_collator=data_collator,
         )
     elif model_args.mode == 'policy':
+        print(f"Alpha : {model_args.alpha}")
         trainer = SkipDecodingTrainer(
             model=model,
             args=training_args,
@@ -574,7 +587,9 @@ def main():
             compute_metrics=compute_metrics,
             tokenizer=tokenizer,
             data_collator=data_collator,
+            skip_weight=model_args.alpha,
         )
+
     else:
         raise Exception("Invalid Argument {mode}")
 
