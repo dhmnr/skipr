@@ -16,6 +16,7 @@
 """PyTorch BERT model."""
 
 import math
+import time
 import os
 import warnings
 from dataclasses import dataclass
@@ -1035,8 +1036,17 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             if (i > 0) and (i < len(self.encoder.layer) - 1):
+                # torch.cuda.synchronize()
+                # start = time.perf_counter()
+                
                 skip_logits = self.skip_policy[i](hidden_states[:, 0])  # Use [CLS] token representation
                 skip_probs = torch.sigmoid(skip_logits).squeeze(-1)
+
+                # torch.cuda.synchronize()
+                # end = time.perf_counter()
+
+                # with open("policy_time", 'a') as f:
+                #     f.write(str(end - start) + "\n")
                 # all_skip_probs[:, i] = skip_probs
 
                 if self.training:
@@ -1067,12 +1077,21 @@ class BertModelWithSkipDecoding(BertPreTrainedModel):
             layer_head_mask = head_mask[i] if head_mask is not None else None
 
             if active_samples.sum() == batch_size:
+                # torch.cuda.synchronize()
+                # starte = time.perf_counter()
+
                 layer_outputs = layer_module(
                     hidden_states,
                     attention_mask=attention_mask,
                     head_mask=layer_head_mask,
                     output_attentions=output_attentions,
                 )
+
+                # torch.cuda.synchronize()
+                # ende = time.perf_counter()
+
+                # with open("encoder_time", 'a') as f:
+                #     f.write(str(ende - starte) + "\n")
             else:
                 # Process only active samples
                 active_hidden_states = hidden_states[active_samples]

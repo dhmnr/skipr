@@ -112,3 +112,14 @@ QNLI
   eval_samples_per_second =    185.077
   eval_steps_per_second   =      5.793
 =========================================================================================
+
+Timings:
+policy_time:
+  Mean: 0.000870 seconds
+  Standard Deviation: 0.001120 seconds
+
+encoder_time:
+  Mean: 0.023612 seconds
+  Standard Deviation: 0.121302 seconds
+
+factor : 271x
