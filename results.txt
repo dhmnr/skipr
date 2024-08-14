@@ -122,4 +122,4 @@ encoder_time:
   Mean: 0.023612 seconds
   Standard Deviation: 0.121302 seconds
 
-factor : 271x
+factor : 27x

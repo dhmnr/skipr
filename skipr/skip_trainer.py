@@ -118,7 +118,6 @@ class SkipDecodingTrainer(Trainer):
 
         policy_loss = -(advantage * log_probs).mean()
         
-        # Total loss (you can adjust the entropy coefficient)
         total_loss = policy_loss 
 
         if return_outputs:

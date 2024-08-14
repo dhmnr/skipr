@@ -5,22 +5,39 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "Python Debugger: Module",
             "type": "debugpy",
             "request": "launch",
             "module": "skipr.glue.run_glue",
             "args": [
-                        "--model_name_or_path", "./models/rte/classifier",
-                        "--task_name", "rte",
-                        "--do_eval", "yes",
-                        "--max_seq_length", "128",
-                        "--per_device_train_batch_size", "1",
-                        "--learning_rate", "2e-4",
-                        "--num_train_epochs", "2",
-                        "--output_dir", "./models/rte/policy",
-                        "--overwrite_output_dir", "yes",
-                        "--mode", "policy",
-                    ]
+                "--model_name_or_path",
+                "./models/rte/classifier",
+                "--task_name",
+                "rte",
+                "--do_eval",
+                "yes",
+                "--max_seq_length",
+                "128",
+                "--per_device_train_batch_size",
+                "1",
+                "--learning_rate",
+                "2e-4",
+                "--num_train_epochs",
+                "2",
+                "--output_dir",
+                "./models/rte/policy",
+                "--overwrite_output_dir",
+                "yes",
+                "--mode",
+                "policy",
+            ]
         }
     ]
 }
